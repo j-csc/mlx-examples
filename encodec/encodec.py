@@ -40,19 +40,6 @@ class SEANetEncoder(nn.Module):
         self.hop_length = mx.prod(mx.array(self.ratios))
 
         self.elu = nn.ELU()
-        self.model = nn.Sequential(
-            nn.Conv1d(
-                in_channels=args.audio_channels,
-                out_channels=args.num_filters,
-                kernel_size=args.kernel_size,
-            ),
-            *[SeaNetResnetBlock(args=args, dim=args.num_filters) for _ in range(1)],
-            nn.Conv1d(
-                in_channels=args.num_filters,
-                out_channels=args.num_filters,
-                kernel_size=args.kernel_size,
-            ),
-        )
 
         def _make_layer(in_channels, out_channels, kernel_size):
             mult = 1
@@ -65,9 +52,9 @@ class SEANetEncoder(nn.Module):
             ]
             for i, ratio in enumerate(self.ratios):
                 for j in range(args.num_residual_layers):
-                    self.layers.append(
+                    self.layers += [
                         SeaNetResnetBlock(args=args, dim=args.num_filters * mult)
-                    )
+                    ]
                     pass
 
             pass
