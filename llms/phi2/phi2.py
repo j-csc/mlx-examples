@@ -1,13 +1,14 @@
 import argparse
+import json
+import math
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
-from dataclasses import dataclass
-from mlx.utils import tree_unflatten
-from transformers import AutoTokenizer
 
 import mlx.core as mx
 import mlx.nn as nn
-import math
+from mlx.utils import tree_unflatten
+from transformers import AutoTokenizer
 
 
 @dataclass
@@ -158,8 +159,16 @@ def generate(prompt: mx.array, model: Phi2, temp: Optional[float] = 0.0):
 def load_model(model_path: str):
     model = Phi2(ModelArgs())
     model_path = Path(model_path)
+    with open(model_path / "config.json", "r") as f:
+        config = json.loads(f.read())
+        config.pop("model_type", None)
+        quantization = config.pop("quantization", None)
     weights = mx.load(str(model_path / "weights.npz"))
-    model.update(tree_unflatten(list(weights.items())))
+    weights = tree_unflatten(list(weights.items()))
+    if quantization is not None:
+        nn.QuantizedLinear.quantize_module(model, **quantization)
+    model.update(weights)
+
     tokenizer = AutoTokenizer.from_pretrained("microsoft/phi-2", trust_remote_code=True)
     return model, tokenizer
 
@@ -167,9 +176,9 @@ def load_model(model_path: str):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Phi-2 inference script")
     parser.add_argument(
-        "--model_path",
+        "--model-path",
         type=str,
-        default="phi-2",
+        default="mlx_model",
         help="The path to the model weights",
     )
     parser.add_argument(
@@ -178,7 +187,7 @@ if __name__ == "__main__":
         default="Write a detailed analogy between mathematics and a lighthouse.",
     )
     parser.add_argument(
-        "--max_tokens",
+        "--max-tokens",
         "-m",
         type=int,
         default=100,

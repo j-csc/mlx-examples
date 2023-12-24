@@ -1,17 +1,16 @@
 # Copyright © 2023 Apple Inc.
 
 import argparse
-from dataclasses import dataclass
 import glob
 import json
-import numpy as np
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple, List
-from sentencepiece import SentencePieceProcessor
+from typing import List, Optional, Tuple
 
 import mlx.core as mx
 import mlx.nn as nn
 from mlx.utils import tree_map, tree_unflatten
+from sentencepiece import SentencePieceProcessor
 
 
 @dataclass
@@ -244,19 +243,27 @@ class Tokenizer:
         return out
 
 
-def load_model(folder: str, dtype=mx.float16):
+def load_model(folder: str):
     model_path = Path(folder)
     tokenizer = Tokenizer(str(model_path / "tokenizer.model"))
-    with open("params.json", "r") as f:
+    with open(model_path / "config.json", "r") as f:
         config = json.loads(f.read())
+        config.pop("model_type", None)
+        quantization = config.pop("quantization", None)
         model_args = ModelArgs(**config)
     weight_files = glob.glob(str(model_path / "weights.*.npz"))
     weights = {}
     for wf in weight_files:
         weights.update(mx.load(wf).items())
     weights = tree_unflatten(list(weights.items()))
-    weights = tree_map(lambda p: p.astype(dtype), weights)
     model = Mixtral(model_args)
+    if quantization is not None:
+        # TODO: Quantize gate matrices when < 32 tiles supported
+        quantization["linear_class_predicate"] = (
+            lambda m: isinstance(m, nn.Linear) and m.weight.shape[0] != 8
+        )
+        nn.QuantizedLinear.quantize_module(model, **quantization)
+
     model.update(weights)
     return model, tokenizer
 
@@ -281,9 +288,9 @@ def generate(prompt: mx.array, model: Mixtral, temp: Optional[float] = 0.0):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Mixtral inference script")
     parser.add_argument(
-        "--model_path",
+        "--model-path",
         type=str,
-        default="Mixtral-8x7B-v0.1",
+        default="mlx_model",
         help="The path to the model weights, tokenizer, and config",
     )
     parser.add_argument(
@@ -322,9 +329,16 @@ if __name__ == "__main__":
 
         if (len(tokens) % 10) == 0:
             mx.eval(tokens)
+            eos_index = next(
+                (i for i, t in enumerate(tokens) if t.item() == tokenizer.eos_id), None
+            )
+            if eos_index is not None:
+                tokens = tokens[:eos_index]
             s = tokenizer.decode([t.item() for t in tokens])
             print(s, end="", flush=True)
             tokens = []
+            if eos_index is not None:
+                break
 
     mx.eval(tokens)
     s = tokenizer.decode([t.item() for t in tokens])
