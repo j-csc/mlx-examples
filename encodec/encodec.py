@@ -12,26 +12,50 @@ from mlx.utils import tree_map, tree_unflatten
 from config import ModelConfig
 
 
-class SeaNetResnetBlock(nn.Module):
-    def __init__(self, args: ModelConfig, dim: int):
+class EncodecResnetBlock(nn.Module):
+    def __init__(
+        self,
+        args: ModelConfig,
+        dim: int,
+        kernel_sizes: Sequence[int],
+        dilations: Sequence[int],
+        true_skip: bool = True,
+    ):
         super().__init__()
         self.compress = args.compress
         self.dim = dim
         self.hidden = dim // self.compress
-        self.block = nn.Sequential(
-            nn.ELU(),
-            nn.Conv1d(dim, self.hidden, kernel_size=3, stride=1, bias=False),
-            nn.ELU(),
-            nn.Conv1d(self.hidden, dim, kernel_size=1, stride=1, bias=False),
-        )
-        self.shortcut = nn.Conv1d(dim, dim, kernel_size=1, stride=1, bias=False)
+        self.kernel_sizes = kernel_sizes
+        self.dilations = dilations
+        self.block = nn.Sequential(*self._make_layer(self.dim, self.kernel_sizes))
+        if true_skip:
+            self.shortcut = mx.Identity()
+        else:
+            self.shortcut = nn.Conv1d(dim, dim, kernel_size=1, stride=1, bias=False)
+
+    def _make_layer(self, dim, kernel_size):
+        block = []
+        for i, (kernel_size, dilation) in enumerate(
+            zip(self.kernel_sizes, self.dilations)
+        ):
+            in_chs = dim if i == 0 else self.hidden
+            out_chs = dim if i == len(self.kernel_sizes) - 1 else self.hidden
+            block += [
+                nn.ELU(),
+                nn.Conv1d(
+                    in_chs,
+                    out_chs,
+                    kernel_size=kernel_size,
+                    dilation=dilation,
+                ),
+            ]
 
     def __call__(self, x):
         out = self.shortcut(x) + self.block(x)
         return out
 
 
-class SEANetEncoder(nn.Module):
+class EncodecEncoder(nn.Module):
     def __init__(self, args: ModelConfig):
         super().__init__()
         self.args = args
@@ -53,7 +77,7 @@ class SEANetEncoder(nn.Module):
             for i, ratio in enumerate(self.ratios):
                 for j in range(args.num_residual_layers):
                     self.layers += [
-                        SeaNetResnetBlock(args=args, dim=args.num_filters * mult)
+                        EncodecResnetBlock(args=args, dim=args.num_filters * mult)
                     ]
                     pass
 
@@ -63,30 +87,38 @@ class SEANetEncoder(nn.Module):
         return x
 
 
-class SEANetDecoder(nn.Module):
-    def __init__(self):
+class EncodecDecoder(nn.Module):
+    def __init__(self, args: ModelConfig):
         super().__init__()
+        self.args = args
 
 
 class ResidualVectorQuantizer(nn.Module):
-    def __init__(self):
+    def __init__(self, args: ModelConfig):
         super().__init__()
+        self.args = args
 
 
 class EncodecModel(nn.Module):
     def __init__(self, args: ModelConfig):
         super().__init__()
         self.args = args
-        self.encoder = SEANetEncoder(args=args)
-        # self.quantizer = ResidualVectorQuantizer()
-        # self.decoder = SEANetDecoder()
+        self.encoder = EncodecEncoder(args=args)
+        self.quantizer = ResidualVectorQuantizer(args=args)
+        self.decoder = EncodecDecoder(args=args)
 
     def __call__(self, x: mx.array):
         return self.decoder(self.encoder(x))
 
 
+def print_weights(weights):
+    for k, v in weights.items():
+        print(k, v.shape)
+
+
 def load_model(model_path):
     weights = mx.load(model_path)
+    print_weights(weights)
     weights = tree_unflatten(list(weights.items()))
     weights = tree_map(lambda x: x.astype(mx.float32), weights)
     with open("weights/config.json", "r") as f:
@@ -114,8 +146,8 @@ def test_load_input(fp: str):
 
 
 def test_encodec_decoder():
-    encoder = SEANetEncoder()
-    decoder = SEANetDecoder()
+    encoder = EncodecEncoder()
+    decoder = EncodecDecoder()
     x = mx.random.randn(1, 1, 24000)
     z = encoder(x)
     assert list(z.shape) == [1, 128, 75], z.shape
